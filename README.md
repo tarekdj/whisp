@@ -101,6 +101,10 @@ systemctl --user enable --now whisp
 
 Hold **Caps Lock**, speak, release. Text is cleaned and pasted once.
 
+In a terminal, quiet mode draws a one-line status glyph (`○` idle, `◉`
+recording, `◐` processing, `✓` pasted). `--logs` / `-v` replace it with logs.
+`--no-status` keeps quiet mode blank. systemd has no TTY, so no glyph.
+
 With `stream = true` (or `whisp --stream`), cleaned word batches appear in the
 focused field while you hold; the leftover tail pastes when you release.
 
@@ -115,11 +119,12 @@ Vim / modal editors: dictation always inserts characters. Focus insert mode or
 a plain text field first. Whisp does not detect normal mode.
 
 ```bash
-whisp                 # daemon (quiet)
+whisp                 # daemon (quiet status line)
 whisp --stream        # live batches while holding
 whisp --no-stream     # force one paste on release
-whisp --logs          # INFO logs
+whisp --logs          # INFO logs (no status line)
 whisp -v              # debug logs
+whisp --no-status     # quiet with no glyph
 whisp doctor          # permissions, mic, Ollama, clipboard
 whisp --stdout        # print instead of paste
 whisp --clipboard-only

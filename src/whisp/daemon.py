@@ -14,6 +14,7 @@ from whisp.config import load_config
 from whisp.feedback import beep
 from whisp.hotkey import HotkeyListener
 from whisp.inject import Injector, focused_app_name, focused_is_vte
+from whisp.status import StatusLine
 from whisp.stream import StreamSession, leftover_text, spaced_chunk
 
 log = logging.getLogger("whisp")
@@ -65,6 +66,10 @@ def run_daemon(args: argparse.Namespace) -> None:
     recorder = make_recorder(cfg.sample_rate)
     injector = Injector(inject_mode, paste=cfg.paste)
     listener = HotkeyListener(cfg.hotkey, grab=cfg.grab_keyboard)
+    status = StatusLine(
+        enabled=not args.no_status and not args.logs and not args.verbose,
+        hotkey=cfg.hotkey,
+    )
     streamer = (
         StreamSession(
             recorder,
@@ -102,6 +107,7 @@ def run_daemon(args: argparse.Namespace) -> None:
                 recording = False
             log.exception("failed to start recording")
             beep("error", cfg.beep)
+            status.set("error")
             return
         target_name = focused_app_name()
         target_vte = focused_is_vte(target_name)
@@ -109,6 +115,7 @@ def run_daemon(args: argparse.Namespace) -> None:
         if streamer is not None:
             streamer.start(vte=target_vte)
         beep("start", cfg.beep)
+        status.set("recording")
         log.info("recording")
 
     def on_release() -> None:
@@ -126,11 +133,14 @@ def run_daemon(args: argparse.Namespace) -> None:
         except Exception:
             log.exception("failed to stop recording")
             beep("error", cfg.beep)
+            status.set("error")
             return
         if held_ms < cfg.min_hold_ms:
             log.info("hold %.0fms < %sms; ignore", held_ms, cfg.min_hold_ms)
             beep("cancel", cfg.beep)
+            status.set("cancel")
             return
+        status.set("processing")
         with lock:
             busy = True
 
@@ -142,6 +152,7 @@ def run_daemon(args: argparse.Namespace) -> None:
                     chunk = leftover_text(committed, text)
                     if not chunk and not pasted_any:
                         beep("cancel", cfg.beep)
+                        status.set("cancel")
                         return
                     if chunk:
                         if cfg.cleanup:
@@ -159,6 +170,7 @@ def run_daemon(args: argparse.Namespace) -> None:
                 else:
                     if not text:
                         beep("cancel", cfg.beep)
+                        status.set("cancel")
                         return
                     if cfg.cleanup:
                         text = cleanup_text(
@@ -169,9 +181,11 @@ def run_daemon(args: argparse.Namespace) -> None:
                         )
                     injector.inject(text, vte=vte, restore=True)
                 beep("done", cfg.beep)
+                status.set("done")
             except Exception:
                 log.exception("processing failed")
                 beep("error", cfg.beep)
+                status.set("error")
             finally:
                 with lock:
                     busy = False
@@ -189,6 +203,7 @@ def run_daemon(args: argparse.Namespace) -> None:
         log.info("ready — hold %s to dictate", cfg.hotkey)
         listener.run(on_press, on_release)
     finally:
+        status.close()
         injector.close()
         listener.close()
 
@@ -220,6 +235,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="debug logs (implies --logs)",
+    )
+    parser.add_argument(
+        "--no-status",
+        action="store_true",
+        help="do not draw the quiet-mode status line",
     )
     stream = parser.add_mutually_exclusive_group()
     stream.add_argument(
