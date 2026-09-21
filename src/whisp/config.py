@@ -31,10 +31,10 @@ stream_interval_s = 1.0
 
 VALID_INJECT = {"paste", "clipboard", "stdout"}
 VALID_PASTE = {"auto", "shift+insert", "ctrl+shift+v"}
-_STREAM_KEYS = """\
-stream = false
-stream_interval_s = 1.0
-"""
+_STREAM_DEFAULTS = {
+    "stream": "stream = false",
+    "stream_interval_s": "stream_interval_s = 1.0",
+}
 
 
 @dataclass(frozen=True)
@@ -65,12 +65,17 @@ def load_config(path: Path | None = None, *, write_default: bool = True) -> Conf
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(DEFAULT_TOML, encoding="utf-8")
     data = tomllib.loads(path.read_text(encoding="utf-8"))
-    if write_default and "stream" not in data:
-        text = path.read_text(encoding="utf-8")
-        if text and not text.endswith("\n"):
-            text += "\n"
-        path.write_text(text + _STREAM_KEYS, encoding="utf-8")
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    if write_default:
+        # Append only the keys the config is missing; writing a key that
+        # already exists would make the file unparseable (duplicate key).
+        missing = [line for key, line in _STREAM_DEFAULTS.items() if key not in data]
+        if missing:
+            text = path.read_text(encoding="utf-8")
+            if text and not text.endswith("\n"):
+                text += "\n"
+            new_text = text + "\n".join(missing) + "\n"
+            data = tomllib.loads(new_text)  # validate before touching the file
+            path.write_text(new_text, encoding="utf-8")
     inject = str(data.get("inject", "paste"))
     paste = str(data.get("paste", "auto"))
     if inject not in VALID_INJECT:

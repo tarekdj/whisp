@@ -10,6 +10,8 @@ from evdev import UInput, ecodes
 
 log = logging.getLogger("whisp.inject")
 
+_UNSET = object()
+
 VTE_NAMES = (
     "gnome-terminal-server",
     "gnome-terminal",
@@ -53,11 +55,38 @@ class Injector:
                 name="whisp-inject",
             )
         self._restore_id = 0
+        self._saved_clip: bytes | None | object = _UNSET
+        self._saved_primary: bytes | None | object = _UNSET
 
     def close(self) -> None:
         if self._ui is not None:
             self._ui.close()
             self._ui = None
+
+    def snapshot_clipboard(self) -> None:
+        """Capture the clipboard once; the next restore=True inject restores it.
+
+        Used by streaming sessions so batch pastes (restore=False) don't
+        permanently clobber the user's pre-dictation clipboard.
+        """
+        if self.mode != "paste" or shutil.which("wl-copy") is None:
+            return
+        self._saved_clip = _wl_paste(primary=False)
+        self._saved_primary = _wl_paste(primary=True)
+
+    def restore_snapshot(self) -> None:
+        """Schedule a restore of the snapshot taken by snapshot_clipboard()."""
+        if self._saved_clip is _UNSET:
+            return
+        clip = self._saved_clip
+        primary = self._saved_primary
+        self._saved_clip = self._saved_primary = _UNSET
+        self._restore_id += 1
+        self._restore_later(clip, primary, self._restore_id)  # type: ignore[arg-type]
+
+    def discard_snapshot(self) -> None:
+        """Drop a snapshot without restoring (nothing was pasted)."""
+        self._saved_clip = self._saved_primary = _UNSET
 
     def inject(
         self,
@@ -77,12 +106,24 @@ class Injector:
             raise RuntimeError(
                 "wl-copy not found. Install wl-clipboard: sudo apt install wl-clipboard"
             )
-        self._restore_id += 1
-        restore_id = self._restore_id
-        previous_clip = _wl_paste(primary=False)
-        previous_primary = _wl_paste(primary=True)
+        previous_clip: bytes | None = None
+        previous_primary: bytes | None = None
+        restore_id = 0
+        if restore:
+            self._restore_id += 1
+            restore_id = self._restore_id
+            if self._saved_clip is not _UNSET:
+                # Streaming session: restore the pre-session clipboard, not the
+                # last batch chunk that batch pastes left behind.
+                previous_clip = self._saved_clip  # type: ignore[assignment]
+                previous_primary = self._saved_primary  # type: ignore[assignment]
+                self._saved_clip = self._saved_primary = _UNSET
+            else:
+                previous_clip = _wl_paste(primary=False)
+                previous_primary = _wl_paste(primary=True)
         _wl_copy(text, primary=False)
-        _wl_copy(text, primary=True)
+        if restore:
+            _wl_copy(text, primary=True)
         if self.mode == "clipboard":
             log.info("copied %s chars", len(text))
             return

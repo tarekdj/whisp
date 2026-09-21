@@ -13,6 +13,9 @@ log = logging.getLogger("whisp.stream")
 
 TENTATIVE_WORDS = 2
 MIN_TICK_S = 0.5
+# Transcribe only a trailing window so tick cost stays bounded on long holds.
+# Wide enough to overlap already-committed words for _align_words to anchor on.
+WINDOW_S = 15.0
 _PUNCT_START = ",.;:!?…)]}»"
 _STRIP = ".,;:!?…«»\"'()[]{}"
 
@@ -82,6 +85,15 @@ def spaced_chunk(pasted_any: bool, chunk: str) -> str:
     if pasted_any and chunk[0] not in _PUNCT_START:
         return " " + chunk
     return chunk
+
+
+def match_chunk_case(pasted_any: bool, raw: str, cleaned: str) -> str:
+    """Undo cleanup capitalizing the first word of a mid-sentence chunk."""
+    raw = raw.strip()
+    cleaned = cleaned.strip()
+    if pasted_any and raw and cleaned and raw[0].islower() and cleaned[0].isupper():
+        return cleaned[0].lower() + cleaned[1:]
+    return cleaned
 
 
 def _norm_word(word: str) -> str:
@@ -158,6 +170,7 @@ class StreamSession:
         self._ollama_model = ollama_model
         self._cleanup_timeout_s = cleanup_timeout_s
         self._stop = threading.Event()
+        self._inject_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self.vte = False
         self.committed = ""
@@ -180,7 +193,11 @@ class StreamSession:
         self._thread = None
         if thread is not None and thread.is_alive():
             thread.join(timeout=45)
-        return self.committed
+        # If the join timed out, a zombie tick may still be running. Block
+        # until any in-flight inject finishes; the tick re-checks _stop
+        # inside the lock, so no batch can paste after stop() returns.
+        with self._inject_lock:
+            return self.committed
 
     def _loop(self) -> None:
         if self._stop.wait(MIN_TICK_S):
@@ -199,8 +216,11 @@ class StreamSession:
             audio = self._recorder.snapshot()
             if audio.size < int(MIN_TICK_S * self._sample_rate):
                 return
-            # Full buffer, no initial_prompt: prompting with already-pasted text
-            # makes Whisper omit those words, so freeze/delta would skip until release.
+            window = int(WINDOW_S * self._sample_rate)
+            if audio.size > window:
+                audio = audio[-window:]
+            # No initial_prompt: prompting with already-pasted text makes
+            # Whisper omit those words, so freeze/delta would skip until release.
             text = self._transcriber.transcribe(
                 audio,
                 language=self._language,
@@ -223,6 +243,7 @@ class StreamSession:
                     model=self._ollama_model,
                     timeout=self._cleanup_timeout_s,
                 )
+                chunk = match_chunk_case(self.pasted_any, delta, chunk)
             if self._stop.is_set():
                 return
             paste = spaced_chunk(self.pasted_any, chunk)
@@ -231,9 +252,12 @@ class StreamSession:
             inject: Callable[..., None] | None = getattr(self._injector, "inject", None)
             if inject is None:
                 return
-            inject(paste, vte=self.vte, restore=False)
-            self.committed = frozen
-            self.pasted_any = True
+            with self._inject_lock:
+                if self._stop.is_set():
+                    return
+                inject(paste, vte=self.vte, restore=False)
+                self.committed = frozen
+                self.pasted_any = True
             log.info("batch paste %r", paste[:80])
         except Exception:
             log.exception("stream tick failed")

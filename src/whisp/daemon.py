@@ -15,7 +15,7 @@ from whisp.feedback import beep
 from whisp.hotkey import HotkeyListener
 from whisp.inject import Injector, focused_app_name, focused_is_vte
 from whisp.status import StatusLine
-from whisp.stream import StreamSession, leftover_text, spaced_chunk
+from whisp.stream import StreamSession, leftover_text, match_chunk_case, spaced_chunk
 
 log = logging.getLogger("whisp")
 
@@ -113,6 +113,7 @@ def run_daemon(args: argparse.Namespace) -> None:
         target_vte = focused_is_vte(target_name)
         log.info("target %s (%s)", target_name or "unknown", "vte" if target_vte else "field")
         if streamer is not None:
+            injector.snapshot_clipboard()
             streamer.start(vte=target_vte)
         beep("start", cfg.beep)
         status.set("recording")
@@ -124,25 +125,34 @@ def run_daemon(args: argparse.Namespace) -> None:
             if not recording:
                 return
             recording = False
+            # Claim busy before draining so a re-press during stop() can't
+            # start a new recording that interleaves with this one.
+            busy = True
             held_ms = (time.monotonic() - pressed_at) * 1000
             vte = target_vte
-        committed = streamer.stop() if streamer is not None else ""
-        pasted_any = streamer.pasted_any if streamer is not None else False
         try:
+            # Stop the recorder first so audio spoken after release never
+            # reaches the final transcript while a slow stream tick finishes.
             audio = recorder.stop()
         except Exception:
             log.exception("failed to stop recording")
+            injector.restore_snapshot()
             beep("error", cfg.beep)
             status.set("error")
+            with lock:
+                busy = False
             return
+        committed = streamer.stop() if streamer is not None else ""
+        pasted_any = streamer.pasted_any if streamer is not None else False
         if held_ms < cfg.min_hold_ms:
             log.info("hold %.0fms < %sms; ignore", held_ms, cfg.min_hold_ms)
+            injector.discard_snapshot()
             beep("cancel", cfg.beep)
             status.set("cancel")
+            with lock:
+                busy = False
             return
         status.set("processing")
-        with lock:
-            busy = True
 
         def work() -> None:
             nonlocal busy
@@ -151,22 +161,29 @@ def run_daemon(args: argparse.Namespace) -> None:
                 if streamer is not None:
                     chunk = leftover_text(committed, text)
                     if not chunk and not pasted_any:
+                        injector.discard_snapshot()
                         beep("cancel", cfg.beep)
                         status.set("cancel")
                         return
                     if chunk:
                         if cfg.cleanup:
+                            raw_chunk = chunk
                             chunk = cleanup_text(
                                 chunk,
                                 host=cfg.ollama_host,
                                 model=cfg.ollama_model,
                                 timeout=cfg.cleanup_timeout_s,
                             )
+                            chunk = match_chunk_case(pasted_any, raw_chunk, chunk)
                         injector.inject(
                             spaced_chunk(pasted_any, chunk),
                             vte=vte,
                             restore=True,
                         )
+                    else:
+                        # Batches pasted but no tail: still restore the
+                        # pre-session clipboard snapshot.
+                        injector.restore_snapshot()
                 else:
                     if not text:
                         beep("cancel", cfg.beep)
@@ -184,6 +201,7 @@ def run_daemon(args: argparse.Namespace) -> None:
                 status.set("done")
             except Exception:
                 log.exception("processing failed")
+                injector.restore_snapshot()
                 beep("error", cfg.beep)
                 status.set("error")
             finally:
