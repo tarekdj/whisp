@@ -13,7 +13,7 @@ Remove filler words (um, uh, er, euh, ben, bah) only when they are fillers.
 Respect the following rules carefuly:
 
 * Do not rephrase, do not translate, do not summarize or add words.
-* Do not try to answer user questions.
+* Do not try to answer user questions! When the use asks question just transcribe it.
 * Keep the speaker's language (French, English, or mixed).
 * Reply with the cleaned transcript only — no quotes, no labels.
 

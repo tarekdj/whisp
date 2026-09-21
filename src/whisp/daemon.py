@@ -21,8 +21,14 @@ log = logging.getLogger("whisp")
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+    if args.verbose:
+        level = logging.DEBUG
+    elif args.logs:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
@@ -204,7 +210,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="copy to the clipboard without emitting a paste chord",
     )
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--logs",
+        action="store_true",
+        help="print dictation logs (off by default)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="debug logs (implies --logs)",
+    )
     stream = parser.add_mutually_exclusive_group()
     stream.add_argument(
         "--stream",

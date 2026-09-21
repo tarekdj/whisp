@@ -115,13 +115,14 @@ Vim / modal editors: dictation always inserts characters. Focus insert mode or
 a plain text field first. Whisp does not detect normal mode.
 
 ```bash
-whisp                 # daemon (one paste on release)
+whisp                 # daemon (quiet)
 whisp --stream        # live batches while holding
 whisp --no-stream     # force one paste on release
+whisp --logs          # INFO logs
+whisp -v              # debug logs
 whisp doctor          # permissions, mic, Ollama, clipboard
 whisp --stdout        # print instead of paste
 whisp --clipboard-only
-whisp -v              # debug logs
 ```
 
 ## Config
