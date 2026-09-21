@@ -16,6 +16,9 @@ class Recorder(ABC):
     def start(self) -> None: ...
 
     @abstractmethod
+    def snapshot(self) -> np.ndarray: ...
+
+    @abstractmethod
     def stop(self) -> np.ndarray: ...
 
 
@@ -47,6 +50,12 @@ class SoundDeviceRecorder(Recorder):
         )
         self._stream.start()
 
+    def snapshot(self) -> np.ndarray:
+        with self._lock:
+            if not self._frames:
+                return np.zeros((0,), dtype=np.float32)
+            return np.concatenate(self._frames).astype(np.float32, copy=False)
+
     def stop(self) -> np.ndarray:
         stream = self._stream
         self._stream = None
@@ -66,10 +75,12 @@ class PipewireRecorder(Recorder):
         self.sample_rate = sample_rate
         self._proc: subprocess.Popen[bytes] | None = None
         self._buf = bytearray()
+        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        self._buf = bytearray()
+        with self._lock:
+            self._buf = bytearray()
         self._proc = subprocess.Popen(
             [
                 "pw-record",
@@ -92,10 +103,16 @@ class PipewireRecorder(Recorder):
                 chunk = stdout.read(4096)
                 if not chunk:
                     break
-                self._buf.extend(chunk)
+                with self._lock:
+                    self._buf.extend(chunk)
 
         self._thread = threading.Thread(target=_read, daemon=True)
         self._thread.start()
+
+    def snapshot(self) -> np.ndarray:
+        with self._lock:
+            raw = bytes(self._buf)
+        return _f32_pcm(raw)
 
     def stop(self) -> np.ndarray:
         proc = self._proc
@@ -110,9 +127,17 @@ class PipewireRecorder(Recorder):
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
-        if not self._buf:
-            return np.zeros((0,), dtype=np.float32)
-        return np.frombuffer(bytes(self._buf), dtype=np.float32).copy()
+        with self._lock:
+            raw = bytes(self._buf)
+            self._buf = bytearray()
+        return _f32_pcm(raw)
+
+
+def _f32_pcm(raw: bytes) -> np.ndarray:
+    n = len(raw) // 4 * 4
+    if n == 0:
+        return np.zeros((0,), dtype=np.float32)
+    return np.frombuffer(raw[:n], dtype=np.float32).copy()
 
 
 def make_recorder(sample_rate: int = 16000) -> Recorder:

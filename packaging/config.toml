@@ -12,3 +12,5 @@ min_hold_ms = 200
 cleanup_timeout_s = 4.0
 sample_rate = 16000
 language = ""
+stream = false
+stream_interval_s = 1.0

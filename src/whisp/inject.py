@@ -52,22 +52,33 @@ class Injector:
                 },
                 name="whisp-inject",
             )
+        self._restore_id = 0
 
     def close(self) -> None:
         if self._ui is not None:
             self._ui.close()
             self._ui = None
 
-    def inject(self, text: str) -> None:
+    def inject(
+        self,
+        text: str,
+        *,
+        vte: bool | None = None,
+        restore: bool = True,
+    ) -> None:
         if not text:
             return
         if self.mode == "stdout":
-            print(text, flush=True)
+            print(text, end="", flush=True)
+            if restore:
+                print(flush=True)
             return
         if shutil.which("wl-copy") is None:
             raise RuntimeError(
                 "wl-copy not found. Install wl-clipboard: sudo apt install wl-clipboard"
             )
+        self._restore_id += 1
+        restore_id = self._restore_id
         previous_clip = _wl_paste(primary=False)
         previous_primary = _wl_paste(primary=True)
         _wl_copy(text, primary=False)
@@ -75,20 +86,37 @@ class Injector:
         if self.mode == "clipboard":
             log.info("copied %s chars", len(text))
             return
-        chord = self._chord()
+        chord = self._chord(vte=vte)
         time.sleep(0.05)
         _tap(self._ui, *chord)
         log.info("pasted %s chars with %s", len(text), _chord_name(chord))
-        _restore_later(previous_clip, previous_primary)
+        if restore:
+            self._restore_later(previous_clip, previous_primary, restore_id)
 
-    def _chord(self) -> tuple[int, ...]:
+    def _chord(self, vte: bool | None = None) -> tuple[int, ...]:
         if self.paste == "ctrl+shift+v":
             return (ecodes.KEY_LEFTCTRL, ecodes.KEY_LEFTSHIFT, ecodes.KEY_V)
         if self.paste == "shift+insert":
             return (ecodes.KEY_LEFTSHIFT, ecodes.KEY_INSERT)
-        if focused_is_vte():
+        if vte is None:
+            vte = focused_is_vte()
+        if vte:
             return (ecodes.KEY_LEFTCTRL, ecodes.KEY_LEFTSHIFT, ecodes.KEY_V)
         return (ecodes.KEY_LEFTSHIFT, ecodes.KEY_INSERT)
+
+    def _restore_later(
+        self, clip: bytes | None, primary: bytes | None, restore_id: int, delay: float = 0.4
+    ) -> None:
+        def _restore() -> None:
+            time.sleep(delay)
+            if restore_id != self._restore_id:
+                return
+            if clip is not None:
+                _wl_copy_bytes(clip, primary=False)
+            if primary is not None:
+                _wl_copy_bytes(primary, primary=True)
+
+        threading.Thread(target=_restore, daemon=True).start()
 
 
 def focused_app_name() -> str | None:
@@ -118,8 +146,9 @@ def focused_app_name() -> str | None:
     return None
 
 
-def focused_is_vte() -> bool:
-    name = focused_app_name()
+def focused_is_vte(name: str | None = None) -> bool:
+    if name is None:
+        name = focused_app_name()
     if not name:
         return False
     return any(token in name for token in VTE_NAMES)
@@ -148,17 +177,6 @@ def _wl_copy_bytes(data: bytes, *, primary: bool) -> None:
     if primary:
         cmd.append("--primary")
     subprocess.run(cmd, input=data, check=False)
-
-
-def _restore_later(clip: bytes | None, primary: bytes | None, delay: float = 0.4) -> None:
-    def _restore() -> None:
-        time.sleep(delay)
-        if clip is not None:
-            _wl_copy_bytes(clip, primary=False)
-        if primary is not None:
-            _wl_copy_bytes(primary, primary=True)
-
-    threading.Thread(target=_restore, daemon=True).start()
 
 
 def _tap(ui: UInput | None, *codes: int) -> None:

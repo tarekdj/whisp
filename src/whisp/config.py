@@ -25,10 +25,16 @@ cleanup_timeout_s = 4.0
 sample_rate = 16000
 # empty = auto-detect (needed for mixed FR/EN)
 language = ""
+stream = false
+stream_interval_s = 1.0
 """
 
 VALID_INJECT = {"paste", "clipboard", "stdout"}
 VALID_PASTE = {"auto", "shift+insert", "ctrl+shift+v"}
+_STREAM_KEYS = """\
+stream = false
+stream_interval_s = 1.0
+"""
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,8 @@ class Config:
     cleanup_timeout_s: float = 4.0
     sample_rate: int = 16000
     language: str = ""
+    stream: bool = False
+    stream_interval_s: float = 1.0
     path: Path = DEFAULT_PATH
 
 
@@ -57,6 +65,12 @@ def load_config(path: Path | None = None, *, write_default: bool = True) -> Conf
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(DEFAULT_TOML, encoding="utf-8")
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+    if write_default and "stream" not in data:
+        text = path.read_text(encoding="utf-8")
+        if text and not text.endswith("\n"):
+            text += "\n"
+        path.write_text(text + _STREAM_KEYS, encoding="utf-8")
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
     inject = str(data.get("inject", "paste"))
     paste = str(data.get("paste", "auto"))
     if inject not in VALID_INJECT:
@@ -78,5 +92,7 @@ def load_config(path: Path | None = None, *, write_default: bool = True) -> Conf
         cleanup_timeout_s=float(data.get("cleanup_timeout_s", 4.0)),
         sample_rate=int(data.get("sample_rate", 16000)),
         language=language,
+        stream=bool(data.get("stream", False)),
+        stream_interval_s=max(0.4, float(data.get("stream_interval_s", 1.0))),
         path=path,
     )
