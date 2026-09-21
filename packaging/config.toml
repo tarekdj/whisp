@@ -1,0 +1,14 @@
+# Copied to ~/.config/whisp/config.toml on first run.
+hotkey = "KEY_CAPSLOCK"
+whisper_model = "Systran/faster-whisper-base"
+ollama_host = "http://127.0.0.1:11434"
+ollama_model = "qwen2.5:1.5b"
+cleanup = true
+inject = "paste"
+paste = "auto"
+beep = true
+grab_keyboard = true
+min_hold_ms = 200
+cleanup_timeout_s = 4.0
+sample_rate = 16000
+language = ""

@@ -1,0 +1,16 @@
+[Unit]
+Description=Whisp local hold-to-talk dictation
+After=graphical-session.target pipewire.service
+Wants=pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/whisp/.venv/bin/whisp
+WorkingDirectory=%h/whisp
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

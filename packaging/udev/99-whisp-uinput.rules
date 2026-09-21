@@ -1,0 +1,2 @@
+# Allow the input group to create virtual keyboards for paste injection.
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
