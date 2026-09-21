@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Tests only touch pure-Python modules; sounddevice/faster-whisper/
+      # evdev are imported lazily, so the heavy deps are not needed here.
+      - name: Install test dependencies
+        run: pip install numpy httpx pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -q

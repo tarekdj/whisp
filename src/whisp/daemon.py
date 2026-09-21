@@ -13,15 +13,23 @@ from whisp.cleanup import cleanup_text
 from whisp.config import load_config
 from whisp.feedback import beep
 from whisp.hotkey import HotkeyListener
-from whisp.inject import Injector
+from whisp.inject import Injector, focused_app_name, focused_is_vte
+from whisp.status import StatusLine
+from whisp.stream import StreamSession, leftover_text, match_chunk_case, spaced_chunk
 
 log = logging.getLogger("whisp")
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+    if args.verbose:
+        level = logging.DEBUG
+    elif args.logs:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
@@ -44,26 +52,49 @@ def run_daemon(args: argparse.Namespace) -> None:
         else cfg.inject
     )
     log.info("config %s", cfg.path)
+    use_stream = cfg.stream if args.stream is None else args.stream
     log.info(
-        "hotkey=%s whisper=%s ollama=%s inject=%s",
+        "hotkey=%s whisper=%s ollama=%s inject=%s stream=%s",
         cfg.hotkey,
         cfg.whisper_model,
         cfg.ollama_model if cfg.cleanup else "off",
         inject_mode,
+        "on" if use_stream else "off",
     )
 
     transcriber = Transcriber(cfg.whisper_model, sample_rate=cfg.sample_rate)
     recorder = make_recorder(cfg.sample_rate)
     injector = Injector(inject_mode, paste=cfg.paste)
     listener = HotkeyListener(cfg.hotkey, grab=cfg.grab_keyboard)
+    status = StatusLine(
+        enabled=not args.no_status and not args.logs and not args.verbose,
+        hotkey=cfg.hotkey,
+    )
+    streamer = (
+        StreamSession(
+            recorder,
+            transcriber,
+            injector,
+            sample_rate=cfg.sample_rate,
+            language=cfg.language,
+            interval_s=cfg.stream_interval_s,
+            cleanup=cfg.cleanup,
+            ollama_host=cfg.ollama_host,
+            ollama_model=cfg.ollama_model,
+            cleanup_timeout_s=cfg.cleanup_timeout_s,
+        )
+        if use_stream
+        else None
+    )
 
     recording = False
     busy = False
     pressed_at = 0.0
+    target_vte = False
     lock = threading.Lock()
 
     def on_press() -> None:
-        nonlocal recording, pressed_at
+        nonlocal recording, pressed_at, target_vte
         with lock:
             if busy or recording:
                 return
@@ -76,8 +107,16 @@ def run_daemon(args: argparse.Namespace) -> None:
                 recording = False
             log.exception("failed to start recording")
             beep("error", cfg.beep)
+            status.set("error")
             return
+        target_name = focused_app_name()
+        target_vte = focused_is_vte(target_name)
+        log.info("target %s (%s)", target_name or "unknown", "vte" if target_vte else "field")
+        if streamer is not None:
+            injector.snapshot_clipboard()
+            streamer.start(vte=target_vte)
         beep("start", cfg.beep)
+        status.set("recording")
         log.info("recording")
 
     def on_release() -> None:
@@ -86,39 +125,85 @@ def run_daemon(args: argparse.Namespace) -> None:
             if not recording:
                 return
             recording = False
+            # Claim busy before draining so a re-press during stop() can't
+            # start a new recording that interleaves with this one.
+            busy = True
             held_ms = (time.monotonic() - pressed_at) * 1000
+            vte = target_vte
         try:
+            # Stop the recorder first so audio spoken after release never
+            # reaches the final transcript while a slow stream tick finishes.
             audio = recorder.stop()
         except Exception:
             log.exception("failed to stop recording")
+            injector.restore_snapshot()
             beep("error", cfg.beep)
+            status.set("error")
+            with lock:
+                busy = False
             return
+        committed = streamer.stop() if streamer is not None else ""
+        pasted_any = streamer.pasted_any if streamer is not None else False
         if held_ms < cfg.min_hold_ms:
             log.info("hold %.0fms < %sms; ignore", held_ms, cfg.min_hold_ms)
+            injector.discard_snapshot()
             beep("cancel", cfg.beep)
+            status.set("cancel")
+            with lock:
+                busy = False
             return
-        with lock:
-            busy = True
+        status.set("processing")
 
         def work() -> None:
             nonlocal busy
             try:
                 text = transcriber.transcribe(audio, language=cfg.language)
-                if not text:
-                    beep("cancel", cfg.beep)
-                    return
-                if cfg.cleanup:
-                    text = cleanup_text(
-                        text,
-                        host=cfg.ollama_host,
-                        model=cfg.ollama_model,
-                        timeout=cfg.cleanup_timeout_s,
-                    )
-                injector.inject(text)
+                if streamer is not None:
+                    chunk = leftover_text(committed, text)
+                    if not chunk and not pasted_any:
+                        injector.discard_snapshot()
+                        beep("cancel", cfg.beep)
+                        status.set("cancel")
+                        return
+                    if chunk:
+                        if cfg.cleanup:
+                            raw_chunk = chunk
+                            chunk = cleanup_text(
+                                chunk,
+                                host=cfg.ollama_host,
+                                model=cfg.ollama_model,
+                                timeout=cfg.cleanup_timeout_s,
+                            )
+                            chunk = match_chunk_case(pasted_any, raw_chunk, chunk)
+                        injector.inject(
+                            spaced_chunk(pasted_any, chunk),
+                            vte=vte,
+                            restore=True,
+                        )
+                    else:
+                        # Batches pasted but no tail: still restore the
+                        # pre-session clipboard snapshot.
+                        injector.restore_snapshot()
+                else:
+                    if not text:
+                        beep("cancel", cfg.beep)
+                        status.set("cancel")
+                        return
+                    if cfg.cleanup:
+                        text = cleanup_text(
+                            text,
+                            host=cfg.ollama_host,
+                            model=cfg.ollama_model,
+                            timeout=cfg.cleanup_timeout_s,
+                        )
+                    injector.inject(text, vte=vte, restore=True)
                 beep("done", cfg.beep)
+                status.set("done")
             except Exception:
                 log.exception("processing failed")
+                injector.restore_snapshot()
                 beep("error", cfg.beep)
+                status.set("error")
             finally:
                 with lock:
                     busy = False
@@ -136,6 +221,7 @@ def run_daemon(args: argparse.Namespace) -> None:
         log.info("ready — hold %s to dictate", cfg.hotkey)
         listener.run(on_press, on_release)
     finally:
+        status.close()
         injector.close()
         listener.close()
 
@@ -157,7 +243,36 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="copy to the clipboard without emitting a paste chord",
     )
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--logs",
+        action="store_true",
+        help="print dictation logs (off by default)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="debug logs (implies --logs)",
+    )
+    parser.add_argument(
+        "--no-status",
+        action="store_true",
+        help="do not draw the quiet-mode status line",
+    )
+    stream = parser.add_mutually_exclusive_group()
+    stream.add_argument(
+        "--stream",
+        dest="stream",
+        action="store_true",
+        help="paste cleaned batches while holding",
+    )
+    stream.add_argument(
+        "--no-stream",
+        dest="stream",
+        action="store_false",
+        help="disable live batches; one paste on release",
+    )
+    parser.set_defaults(stream=None)
     parser.add_argument(
         "command",
         nargs="?",

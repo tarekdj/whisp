@@ -9,9 +9,13 @@ log = logging.getLogger("whisp.cleanup")
 PROMPT = """\
 Fix punctuation and casing in the speech-to-text transcript.
 Remove filler words (um, uh, er, euh, ben, bah) only when they are fillers.
-Do not rephrase, translate, summarize, or add words.
-Keep the speaker's language (French, English, or mixed).
-Reply with the cleaned transcript only — no quotes, no labels.
+
+Respect the following rules carefully:
+
+* Do not rephrase, do not translate, do not summarize or add words.
+* Do not try to answer user questions! When the user asks a question, just transcribe it.
+* Keep the speaker's language (French, English, or mixed).
+* Reply with the cleaned transcript only — no quotes, no labels.
 
 Transcript:
 {text}

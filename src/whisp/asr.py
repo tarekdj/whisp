@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
 import numpy as np
 
@@ -30,13 +31,35 @@ class Transcriber:
             compute_type="int8",
             cpu_threads=threads,
         )
+        self._lock = threading.Lock()
 
-    def transcribe(self, audio: np.ndarray, language: str = "") -> str:
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        language: str = "",
+        *,
+        prompt: str = "",
+        partial: bool = False,
+    ) -> str:
+        with self._lock:
+            return self._transcribe_locked(
+                audio, language=language, prompt=prompt, partial=partial
+            )
+
+    def _transcribe_locked(
+        self,
+        audio: np.ndarray,
+        *,
+        language: str,
+        prompt: str,
+        partial: bool,
+    ) -> str:
         if audio.size == 0:
             return ""
         audio = _prepare_audio(audio)
         peak, rms, dc = _stats(audio)
-        log.info(
+        log.log(
+            logging.DEBUG if partial else logging.INFO,
             "audio %.2fs peak=%.3f rms=%.3f dc=%.3f",
             audio.size / self.sample_rate,
             peak,
@@ -44,27 +67,49 @@ class Transcriber:
             dc,
         )
         if peak < 0.005:
-            log.info("audio too quiet (peak %.4f); skipping", peak)
+            log.log(
+                logging.DEBUG if partial else logging.INFO,
+                "audio too quiet (peak %.4f); skipping",
+                peak,
+            )
             return ""
 
-        text = self._run(audio, language=language, vad=True)
+        text = self._run(
+            audio, language=language, vad=True, prompt=prompt, partial=partial
+        )
         if not text:
-            log.info("empty after VAD; retrying without VAD")
-            text = self._run(audio, language=language, vad=False)
+            log.log(
+                logging.DEBUG if partial else logging.INFO,
+                "empty after VAD; retrying without VAD",
+            )
+            text = self._run(
+                audio, language=language, vad=False, prompt=prompt, partial=partial
+            )
         return text
 
-    def _run(self, audio: np.ndarray, *, language: str, vad: bool) -> str:
-        segments, info = self.model.transcribe(
-            audio,
-            language=language or None,
-            vad_filter=vad,
-            vad_parameters=_VAD_SHORT if vad else None,
-            beam_size=1,
-            without_timestamps=True,
-        )
+    def _run(
+        self,
+        audio: np.ndarray,
+        *,
+        language: str,
+        vad: bool,
+        prompt: str = "",
+        partial: bool = False,
+    ) -> str:
+        kwargs: dict = {
+            "language": language or None,
+            "vad_filter": vad,
+            "vad_parameters": _VAD_SHORT if vad else None,
+            "beam_size": 1,
+            "without_timestamps": True,
+        }
+        if prompt:
+            kwargs["initial_prompt"] = prompt
+        segments, info = self.model.transcribe(audio, **kwargs)
         text = "".join(segment.text for segment in segments).strip()
         detected = getattr(info, "language", None)
-        log.info(
+        log.log(
+            logging.DEBUG if partial else logging.INFO,
             "asr %s vad=%s: %s",
             detected or language or "auto",
             vad,

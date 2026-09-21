@@ -193,6 +193,16 @@ def run_doctor() -> int:
     print("\nWhisper")
     print(f"       model {cfg.whisper_model} downloads on first daemon start")
 
+    print("\nStreaming")
+    if cfg.stream:
+        ok(
+            f"live batches every {cfg.stream_interval_s:.1f}s "
+            f"(cleanup={'on' if cfg.cleanup else 'off'}); "
+            "off by default — stream = false or whisp --no-stream"
+        )
+    else:
+        ok("stream off (default) — one paste on release; enable with stream = true or whisp --stream")
+
     print("\nHost setup (once)")
     root = Path(__file__).resolve().parents[2]
     print(

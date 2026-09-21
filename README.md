@@ -27,6 +27,9 @@ fillers. It does not rewrite, translate, or run voice commands.
    - most GTK / Firefox fields, address bar → Shift+Insert
    - VTE terminals (gnome-terminal, Ptyxis, …) → Ctrl+Shift+V
 
+Live batches are off by default. Set `stream = true` or start with `whisp --stream`
+to paste cleaned word batches while you hold, then the leftover tail on release.
+
 Caps Lock is grabbed and replayed so it does not toggle. If grab fails on a
 device, that keyboard’s Caps Lock still toggles — disable Caps Lock in GNOME
 Tweaks as a fallback.
@@ -96,7 +99,14 @@ systemctl --user enable --now whisp
 
 ## Usage
 
-Hold **Caps Lock**, speak, release.
+Hold **Caps Lock**, speak, release. Text is cleaned and pasted once.
+
+In a terminal, quiet mode draws a one-line status glyph (`○` idle, `◉`
+recording, `◐` processing, `✓` pasted). `--logs` / `-v` replace it with logs.
+`--no-status` keeps quiet mode blank. systemd has no TTY, so no glyph.
+
+With `stream = true` (or `whisp --stream`), cleaned word batches appear in the
+focused field while you hold; the leftover tail pastes when you release.
 
 | Target | How text lands |
 | --- | --- |
@@ -109,11 +119,15 @@ Vim / modal editors: dictation always inserts characters. Focus insert mode or
 a plain text field first. Whisp does not detect normal mode.
 
 ```bash
-whisp                 # daemon
+whisp                 # daemon (quiet status line)
+whisp --stream        # live batches while holding
+whisp --no-stream     # force one paste on release
+whisp --logs          # INFO logs (no status line)
+whisp -v              # debug logs
+whisp --no-status     # quiet with no glyph
 whisp doctor          # permissions, mic, Ollama, clipboard
 whisp --stdout        # print instead of paste
 whisp --clipboard-only
-whisp -v              # debug logs
 ```
 
 ## Config
@@ -135,6 +149,8 @@ Written on first run to `~/.config/whisp/config.toml` (`WHISP_CONFIG` or
 | `language` | `""` (auto) | set `fr` or `en` to skip detection |
 | `min_hold_ms` | `200` | ignore accidental taps |
 | `cleanup_timeout_s` | `4.0` | fall back to raw ASR after this |
+| `stream` | `false` | `true` pastes cleaned batches while holding; default is one paste on release |
+| `stream_interval_s` | `1.0` | how often a new frozen batch is transcribed |
 
 Cleanup **does not rewrite**. It restores punctuation/casing and drops fillers
 (`um`, `uh`, `euh`, …). Voice commands and “make this an email” modes are out
@@ -179,6 +195,9 @@ and a done beep.
 
 After `whisp doctor` prints `ready`: hold Caps Lock, speak, and the text should
 appear in gedit, in gnome-terminal, and in the Firefox address bar.
+
+With `stream = true`, batches should appear while you speak and the tail on
+release.
 
 ## License
 
