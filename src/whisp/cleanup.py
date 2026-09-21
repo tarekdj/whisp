@@ -58,21 +58,21 @@ def cleanup_text(
         cleaned = str(response.json().get("response", "")).strip()
         cleaned = _strip_wrappers(cleaned)
         if not cleaned:
-            log.warning("cleanup returned empty; using raw ASR")
+            log.info("cleanup returned empty; using raw ASR")
             return text
         if not _cleanup_faithful(text, cleaned):
-            log.warning("cleanup changed meaning or answered; using raw ASR")
+            log.info("cleanup changed meaning or answered; using raw ASR")
             return text
         if len(cleaned) > max(40, int(len(text) * 1.8)):
-            log.warning("cleanup expanded text too much; using raw ASR")
+            log.info("cleanup expanded text too much; using raw ASR")
             return text
         log.info("cleanup: %s", cleaned[:120])
         return cleaned
     except httpx.TimeoutException:
-        log.warning("cleanup timed out after %ss; using raw ASR", timeout)
+        log.info("cleanup timed out after %ss; using raw ASR", timeout)
         return text
     except Exception as exc:  # noqa: BLE001
-        log.warning("cleanup failed (%s); using raw ASR", exc)
+        log.info("cleanup failed (%s); using raw ASR", exc)
         return text
 
 

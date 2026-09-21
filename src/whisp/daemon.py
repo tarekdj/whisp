@@ -22,10 +22,16 @@ log = logging.getLogger("whisp")
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+    quiet_status = (
+        not args.no_status and not args.logs and not args.verbose and args.command != "doctor"
+    )
     if args.verbose:
         level = logging.DEBUG
     elif args.logs:
         level = logging.INFO
+    elif quiet_status:
+        # Status line uses stderr; suppress INFO/WARNING so logs don't clobber the glyph.
+        level = logging.ERROR
     else:
         level = logging.WARNING
     logging.basicConfig(
