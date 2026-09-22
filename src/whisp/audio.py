@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -9,6 +11,72 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 log = logging.getLogger("whisp.audio")
+
+# pw-record understands this PipeWire alias; tracks GNOME's default input without pactl.
+_PW_DEFAULT_TARGET = "@DEFAULT_AUDIO_SOURCE@"
+_WPCTL_SOURCE_RE = re.compile(r"\*\s+(\d+)\.\s+(.+?)\s+\[")
+
+
+def default_sounddevice_input(sd: object) -> tuple[int | None, str]:
+    """Current PortAudio default capture device (re-query on each hold)."""
+    default = getattr(sd, "default", None)
+    idx = default.device[0] if default and default.device else None
+    if idx is None:
+        return None, "unknown"
+    try:
+        name = sd.query_devices(idx).get("name", str(idx))  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001
+        name = str(idx)
+    return int(idx), f"[{idx}] {name}"
+
+
+def _wpctl_default_source_label() -> str | None:
+    if not shutil.which("wpctl"):
+        return None
+    try:
+        out = subprocess.check_output(
+            ["wpctl", "status"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    in_sources = False
+    for line in out.splitlines():
+        if "Sources:" in line:
+            in_sources = True
+            continue
+        if not in_sources:
+            continue
+        if "Source endpoints:" in line or "Streams:" in line:
+            break
+        match = _WPCTL_SOURCE_RE.search(line)
+        if match:
+            return f"[{match.group(1)}] {match.group(2).strip()}"
+    return None
+
+
+def pipewire_default_capture() -> tuple[str | None, str]:
+    """pw-record --target and a human label for logs."""
+    if shutil.which("pactl"):
+        try:
+            out = subprocess.check_output(
+                ["pactl", "get-default-source"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).strip()
+            if out:
+                return out, out
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+    label = _wpctl_default_source_label()
+    if label:
+        return _PW_DEFAULT_TARGET, label
+    if shutil.which("pw-record"):
+        return _PW_DEFAULT_TARGET, _PW_DEFAULT_TARGET
+    return None, "PipeWire default (auto)"
 
 
 class Recorder(ABC):
@@ -36,18 +104,24 @@ class SoundDeviceRecorder(Recorder):
         with self._lock:
             self._frames = []
 
+        device, label = default_sounddevice_input(self._sd)
+        log.info("input %s @ %s Hz", label, self.sample_rate)
+
         def callback(indata, frames, time_info, status) -> None:  # noqa: ANN001
             if status:
                 log.debug("audio status: %s", status)
             with self._lock:
                 self._frames.append(np.copy(indata[:, 0]))
 
-        self._stream = self._sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-            callback=callback,
-        )
+        stream_kwargs: dict = {
+            "samplerate": self.sample_rate,
+            "channels": 1,
+            "dtype": "float32",
+            "callback": callback,
+        }
+        if device is not None:
+            stream_kwargs["device"] = device
+        self._stream = self._sd.InputStream(**stream_kwargs)
         self._stream.start()
 
     def snapshot(self) -> np.ndarray:
@@ -81,17 +155,22 @@ class PipewireRecorder(Recorder):
     def start(self) -> None:
         with self._lock:
             self._buf = bytearray()
+        target, label = pipewire_default_capture()
+        log.info("input %s @ %s Hz", label, self.sample_rate)
+        cmd = [
+            "pw-record",
+            "--rate",
+            str(self.sample_rate),
+            "--channels",
+            "1",
+            "--format",
+            "f32",
+        ]
+        if target:
+            cmd.extend(["--target", target])
+        cmd.append("-")
         self._proc = subprocess.Popen(
-            [
-                "pw-record",
-                "--rate",
-                str(self.sample_rate),
-                "--channels",
-                "1",
-                "--format",
-                "f32",
-                "-",
-            ],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
@@ -140,19 +219,65 @@ def _f32_pcm(raw: bytes) -> np.ndarray:
     return np.frombuffer(raw[:n], dtype=np.float32).copy()
 
 
+def _peak(audio: np.ndarray) -> float:
+    if audio.size == 0:
+        return 0.0
+    return float(np.max(np.abs(audio)))
+
+
+def _pipewire_capture_ready() -> bool:
+    return shutil.which("pw-record") is not None and pipewire_default_capture()[0] is not None
+
+
+def _probe_pipewire(sample_rate: int) -> None:
+    rec = PipewireRecorder(sample_rate)
+    rec.start()
+    rec.stop()
+
+
+def _probe_sounddevice(sample_rate: int) -> float:
+    rec = SoundDeviceRecorder(sample_rate)
+    rec.start()
+    audio = rec.stop()
+    return _peak(audio)
+
+
 def make_recorder(sample_rate: int = 16000) -> Recorder:
-    try:
-        rec = SoundDeviceRecorder(sample_rate)
-        # Fail fast if PortAudio cannot open the default source.
-        rec.start()
-        rec.stop()
-        device = rec._sd.default.device[0]
+    # GNOME/PipeWire default input follows pactl, not always PortAudio's "default".
+    if _pipewire_capture_ready():
         try:
-            name = rec._sd.query_devices(device).get("name", str(device))
-        except Exception:  # noqa: BLE001
-            name = str(device)
-        log.info("audio backend: sounddevice [%s] %s @ %s Hz", device, name, sample_rate)
+            _probe_pipewire(sample_rate)
+            log.info(
+                "audio backend: pw-record @ %s Hz (PipeWire default source each hold)",
+                sample_rate,
+            )
+            return PipewireRecorder(sample_rate)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("pw-record unavailable (%s); trying sounddevice", exc)
+
+    try:
+        peak = _probe_sounddevice(sample_rate)
+        if peak < 0.005 and shutil.which("pw-record") is not None:
+            log.warning(
+                "sounddevice default is silent (peak %.4f); using pw-record",
+                peak,
+            )
+            _probe_pipewire(sample_rate)
+            log.info(
+                "audio backend: pw-record @ %s Hz (default source each hold)",
+                sample_rate,
+            )
+            return PipewireRecorder(sample_rate)
+        log.info(
+            "audio backend: sounddevice @ %s Hz (default input re-resolved each hold)",
+            sample_rate,
+        )
         return SoundDeviceRecorder(sample_rate)
     except Exception as exc:  # noqa: BLE001
         log.warning("sounddevice unavailable (%s); falling back to pw-record", exc)
+        _probe_pipewire(sample_rate)
+        log.info(
+            "audio backend: pw-record @ %s Hz (default source each hold)",
+            sample_rate,
+        )
         return PipewireRecorder(sample_rate)
