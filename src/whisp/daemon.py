@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import threading
 import time
@@ -12,6 +13,7 @@ from whisp.audio import make_recorder
 from whisp.cleanup import cleanup_text
 from whisp.config import load_config
 from whisp.feedback import beep
+from whisp.instance_lock import InstanceAlreadyRunning, acquire_instance_lock, instance_lock_path
 from whisp.hotkey import HotkeyListener
 from whisp.inject import Injector, focused_app_name, focused_is_vte
 from whisp.status import StatusLine
@@ -50,6 +52,15 @@ def main(argv: list[str] | None = None) -> None:
 
 def run_daemon(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
+    lock_path = instance_lock_path(cfg.path)
+    try:
+        instance_lock_fd = acquire_instance_lock(lock_path)
+    except InstanceAlreadyRunning as exc:
+        if exc.pid is not None:
+            log.error("already running (pid %s); lock %s", exc.pid, lock_path)
+        else:
+            log.error("already running; lock %s", lock_path)
+        raise SystemExit(1) from None
     inject_mode = (
         "stdout"
         if args.stdout
@@ -230,6 +241,7 @@ def run_daemon(args: argparse.Namespace) -> None:
         status.close()
         injector.close()
         listener.close()
+        os.close(instance_lock_fd)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
